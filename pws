@@ -1,0 +1,170 @@
+#!/usr/bin/env ruby
+#
+# Copyright (C) 2015 Luca Filipozzi
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+require 'gpgme'
+require 'thor'
+require 'yaml'
+
+class Editor
+  def initialize
+    editors = []
+    if ENV['EDITOR']
+      if ENV['EDITOR'].include?(File::PATH_SEPARATOR)
+        editors.push(ENV['EDITOR'])
+      else
+        ENV["PATH"].split(File::PATH_SEPARATOR).map{|x| editors.push(File.join(x, ENV['EDITOR']))}
+      end
+    end
+    editors += %w{/usr/bin/sensible-editor /usr/bin/editor /usr/bin/vi}
+    @editor = editors.detect{|x| File.executable?(x)}
+    raise "editor not found" unless @editor
+  end
+
+  def edit(content)
+    tempfile = Tempfile.open('pws')
+    tempfile.write(content)
+    tempfile.close
+    system(@editor, tempfile.path)
+    return IO.read(tempfile.path)
+  end
+end
+
+class Crypto
+  def initialize()
+    @crypto = GPGME::Crypto.new
+    @users = {}
+    @groups = {}
+
+    pwscfg = File.join(ENV['HOME'], '.pws.yaml')
+    raise "error: #{pwscfg} is not readable" unless File.readable?(pwscfg)
+
+    yaml = YAML::load_file(pwscfg)
+    key = 'trusted_users'
+    raise "error: #{pwscfg} has no '#{key}' key" unless yaml.has_key?(key)
+
+    trusted_users = yaml[key]
+    dir = Dir.pwd
+    raise "error: #{pwscfg} has no '#{key}/#{dir}' key" unless trusted_users.has_key?(dir)
+
+    trusted_users_for_dir = trusted_users[dir]
+
+    dircfg = File.join(dir, '.users')
+    raise "error: #{dircfg} is not readable" unless File.readable?(dircfg)
+
+    valid = false
+    lines = @crypto.verify(IO.read(dircfg)) do |sig|
+      valid = true if sig.valid? and trusted_users_for_dir.include?(sig.fpr)
+    end.to_s
+    raise "error: #{dircfg} has invalid signature" unless valid
+
+    lines.each_line do |line| # TODO reimplement in yaml or toml; use DAG
+      if (m = /^(@[a-zA-Z0-9-]+)\s*=\s*(.*)$/.match(line))
+        raise "error: #{dircfg} has duplicate group: #{m[1]}" if @groups.has_key?(m[1])
+        @groups[m[1]] = []
+        m[2].split(/[\t ,]+/).each do |x|
+          if x.start_with?('@')
+            raise "error: #{dircfg} has unknown group: #{x}" unless @groups.has_key?(x)
+          else
+            raise "error: #{dircfg} has unknown user: #{x}" unless @users.has_key?(x)
+          end
+          @groups[m[1]].push(x)
+        end
+      elsif (m = /^([a-zA-Z0-9:-]+)\s*=\s*([0-9A-Fa-f]{40})\s*$/.match(line))
+        raise "error: #{dircfg} has duplicate user: #{m[1]}" if @users.has_key?(m[1])
+        @users[m[1]] = m[2]
+      end
+    end
+  end
+
+  def decrypt(content)
+    @crypto.decrypt(content).to_s
+  end
+
+  def encrypt(content)
+    raise 'no content to encrypt' if content.nil? or content.empty?
+    access = content.lines.first.chomp.sub!(/^access: /, '')
+    raise 'invalid access line' if access.nil? or access.empty?
+    recipients = get_recipients(access)
+    raise 'no recipients of encryption' if recipients.nil? or recipients.empty?
+    @crypto.encrypt(content, :armor => true, :always_trust => true, :recipients => recipients)
+  end
+
+  private
+
+  def get_recipients(x)
+    x.split(/[\t ,]+/).collect do |y|
+      if y.start_with?('@')
+        raise "invalid access line: unknown group: #{y}" unless @groups.has_key?(y)
+        @groups[y].collect{|z| get_recipients(z)} # recurse
+      else
+        raise "invalid access line: unknown user: #{y}" unless @users.has_key?(y)
+        [ @users[y] ] # flatten requires list
+      end
+    end.flatten.uniq
+  end
+end
+
+class App < Thor
+  package_name File.basename($0, '.*')
+
+  def initialize(*args)
+    super
+    @editor = Editor.new
+    @crypto = Crypto.new
+  end
+
+  desc "add FILE", "add a new file"
+  def add(file)
+    raise "file #{file} already exists" if File.exists?(file)
+    IO.write(file, @crypto.encrypt(@editor.edit('access: FIXME')))
+  end
+
+  desc "cat FILE", "cat file to stdout"
+  def cat(file)
+    STDOUT.write(@crypto.decrypt(IO.read(file)))
+  end
+
+  desc "enc FILE", "(re-)encrpyt file"
+  def enc(file)
+    IO.write(file, @crypto.encrypt(@crypto.decrypt(IO.read(file))))
+  end
+
+  desc "mod FILE", "modify existing file"
+  def mod(file)
+    original_content = @crypto.decrypt(IO.read(file))
+    modified_content = @editor.edit(original_content)
+    unless modified_content == original_content
+      IO.write(file, @crypto.encrypt(modified_content))
+    end
+  end
+
+  desc "ls", "list directory contents"
+  def ls
+    raise "'ls' not yet implemented"
+  end
+end
+
+if __FILE__ == $0
+  App.start
+end
+
+# vim: set ts=2 sw=2 et ai si fdm=indent:
