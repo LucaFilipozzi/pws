@@ -202,6 +202,7 @@ class App < Thor
 
   desc "cat FILE", "cat file"
   def cat(file)
+    raise "error: file #{file} is not encrypted" unless File.encrypted?(file)
     STDOUT.write(@crypto.decrypt(IO.read(file)))
   end
 
