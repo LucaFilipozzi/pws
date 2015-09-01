@@ -21,7 +21,7 @@ Two challenges remain:
   allow this reimplementation to make use of `dir/.keyring`
 - determine whether [ruby-gpgme][3] could emit the encryption recipients of an encrypted
   file without explicitly decrypting it (by examining the underlying packets): this would
-  allow the 'dir' command to be implemented, allowing the files to verified as having
+  allow the 'dir' command to be implemented so that the files may be verified as having
   been encrypted for the appropriate targets
 
 [1]: https://github.com/weaselp/pwstore
