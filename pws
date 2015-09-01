@@ -23,6 +23,8 @@
 require 'httparty'
 require 'gpgme'
 require 'magic'
+require 'pathname'
+require 'shell'
 require 'thor'
 require 'yaml'
 
@@ -37,23 +39,40 @@ module CoreExtensions
       end
     end
   end
+  module GPGME
+    module Key
+      def self.included(base)
+        base.extend(ClassMethods)
+      end
+      module ClassMethods
+        def include?(fpr)
+          not self.find(:public, fpr).empty?
+        end
+        def exclude?(fpr)
+          not self.include?(fpr)
+        end
+      end
+    end
+  end
 end
 
 File.include CoreExtensions::File
+GPGME::Key.include CoreExtensions::GPGME::Key
 
 class Editor
   def initialize
     editors = []
-    if ENV['EDITOR']
-      if ENV['EDITOR'].include?(File::PATH_SEPARATOR)
-        editors.push(ENV['EDITOR'])
+    unless ENV['EDITOR'].nil? or ENV['EDITOR'].empty?
+      editor = Pathname.new(ENV['EDITOR'].chomp)
+      if editor.absolute?
+        editors.push(editor.cleanpath)
       else
-        ENV["PATH"].split(File::PATH_SEPARATOR).map{|x| editors.push(File.join(x, ENV['EDITOR']))}
+        editors += Shell.default_system_path.collect{|x| File.join(x, editor)}
       end
     end
     editors += %w{/usr/bin/sensible-editor /usr/bin/editor /usr/bin/vi}
     @editor = editors.detect{|x| File.executable?(x)}
-    raise "editor not found" unless @editor
+    raise 'error: editor not found' unless @editor
   end
 
   def edit(content)
@@ -92,7 +111,9 @@ class Crypto
     end.to_s
     raise "error: #{dircfg} has invalid signature" unless valid
 
-    lines.each_line do |line| # TODO implement with yaml/toml? use a directed acyclic graph?
+    lines.each_line do |line|
+      next if line =~ /^#/
+      next if line =~ /^$/
       if (m = /^(@[a-zA-Z0-9-]+)\s*=\s*(.*)$/.match(line))
         raise "error: #{dircfg} has duplicate group: #{m[1]}" if @groups.has_key?(m[1])
         @groups[m[1]] = []
@@ -107,51 +128,57 @@ class Crypto
       elsif (m = /^([a-zA-Z0-9:-]+)\s*=\s*([0-9A-Fa-f]{40})\s*$/.match(line))
         raise "error: #{dircfg} has duplicate user: #{m[1]}" if @users.has_key?(m[1])
         @users[m[1]] = m[2]
+      else
+        raise "error: #{dircfg} has invalid line: #{line}"
       end
     end
   end
 
   def decrypt(content)
-    raise 'no content to decrypt' if content.nil? or content.empty?
+    raise 'error: no content to decrypt' if content.nil? or content.empty?
     GPGME::Crypto.decrypt(content).to_s
   end
 
   def encrypt(content)
-    raise 'no content to encrypt' if content.nil? or content.empty?
+    raise 'error: no content to encrypt' if content.nil? or content.empty?
     access = content.lines.first.chomp.sub!(/^access: /, '')
-    raise 'invalid access line' if access.nil? or access.empty?
-    recipients = get_recipients(access)
-    raise 'no recipients of encryption' if recipients.nil? or recipients.empty?
-    recipients.each do |recipient|
-      raise 'missing keys for some recipients' if GPGME::Key.find(:public, recipient).empty?
-    end
-    GPGME::Crypto.encrypt(content, :armor => true, :always_trust => true, :recipients => recipients)
+    raise 'error: invalid access line' if access.nil? or access.empty?
+    fprs = get_fprs(access)
+    raise 'error: no recipients of encryption' if fprs.nil? or fprs.empty?
+    raise 'error: no keys for some recipients' if fprs.any?{|x| GPGME::Key.exclude?(x)}
+    GPGME::Crypto.encrypt(content, :armor => true, :always_trust => true, :recipients => fprs)
   end
 
   def display_keyring
     @users.each_pair do |user,fpr|
-      result = GPGME::Key.find(:public, fpr).empty? ? 'need' : 'have'
+      result = GPGME::Key.include?(fpr) ? 'have' : 'need'
       STDOUT.puts "#{result} #{fpr} for #{user}"
     end
   end
 
-  def refresh_keyring # TODO add some error handling
+  def refresh_keyring
     @users.each_pair do |user,fpr|
-      STDOUT.puts "importing #{fpr} for #{user}"
-      response = HTTParty.get("https://sks-keyservers.net/pks/lookup?op=get&search=0x#{fpr}&options=mr")
-      GPGME::Key.import(response.body)
+      STDOUT.print "importing #{fpr} for #{user}... "
+      qry = "op=get&search=0x#{fpr}&options=mr"
+      res = HTTParty.get("https://sks-keyservers.net/pks/lookup?#{qry}")
+      if res.code == 200 and res.body.start_with?('-----BEGIN PGP PUBLIC KEY BLOCK-----')
+        STDOUT.puts 'succeeded'
+        GPGME::Key.import(res.body)
+      else
+        STDOUT.puts 'failed'
+      end
     end
   end
 
   private
 
-  def get_recipients(x)
+  def get_fprs(x)
     x.split(/[\t ,]+/).collect do |y|
       if y.start_with?('@')
-        raise "invalid access line: unknown group: #{y}" unless @groups.has_key?(y)
-        @groups[y].collect{|z| get_recipients(z)} # recurse
+        raise "error: invalid access line: unknown group: #{y}" unless @groups.has_key?(y)
+        @groups[y].collect{|z| get_fprs(z)} # recurse
       else
-        raise "invalid access line: unknown user: #{y}" unless @users.has_key?(y)
+        raise "error: invalid access line: unknown user: #{y}" unless @users.has_key?(y)
         [ @users[y] ] # flatten applies to arrays not strings
       end
     end.flatten.uniq
@@ -169,7 +196,7 @@ class App < Thor
 
   desc "add FILE", "add file"
   def add(file)
-    raise "file #{file} already exists" if File.exists?(file)
+    raise "error: file #{file} already exists" if File.exists?(file)
     IO.write(file, @crypto.encrypt(@editor.edit('access: FIXME')))
   end
 
@@ -178,9 +205,15 @@ class App < Thor
     STDOUT.write(@crypto.decrypt(IO.read(file)))
   end
 
+  desc "dec FILE", "decrypt file"
+  def dec(file)
+    raise "error: file #{file} is not encrypted" unless File.encrypted?(file)
+    IO.write(file, @crypto.decrypt(IO.read(file)))
+  end
+
   desc "dir [PATH]", "list directory"
   def dir(path)
-    raise 'not implemented'
+    raise 'error: not implemented'
   end
 
   desc "enc FILE", "(re-)encrypt file"
@@ -191,11 +224,9 @@ class App < Thor
 
   desc "mod FILE", "modify file"
   def mod(file)
-    original_content = @crypto.decrypt(IO.read(file))
-    modified_content = @editor.edit(original_content)
-    unless modified_content == original_content
-      IO.write(file, @crypto.encrypt(modified_content))
-    end
+    old_content = @crypto.decrypt(IO.read(file))
+    new_content = @editor.edit(old_content)
+    IO.write(file, @crypto.encrypt(new_content)) unless new_content == old_content
   end
 
   desc "display-keyring", "display public keys"
