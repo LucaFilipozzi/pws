@@ -59,133 +59,133 @@ end
 File.include CoreExtensions::File
 GPGME::Key.include CoreExtensions::GPGME::Key
 
-class Editor
-  def initialize
-    editors = []
-    unless ENV['EDITOR'].nil? or ENV['EDITOR'].empty?
-      editor = Pathname.new(ENV['EDITOR'].chomp)
-      if editor.absolute?
-        editors.push(editor.cleanpath)
-      else
-        editors += Shell.default_system_path.collect{|x| File.join(x, editor)}
-      end
-    end
-    editors += %w{/usr/bin/sensible-editor /usr/bin/editor /usr/bin/vi}
-    @editor = editors.detect{|x| File.executable?(x)}
-    raise 'error: editor not found' unless @editor
-  end
-
-  def edit(content)
-    tempfile = Tempfile.open('pws')
-    tempfile.write(content)
-    tempfile.close
-    system(@editor, tempfile.path)
-    IO.read(tempfile.path)
-  end
-end
-
-class Crypto
-  def initialize()
-    @users = {}
-    @groups = {}
-
-    pwscfg = File.join(ENV['HOME'], '.pws.yaml')
-    raise "error: #{pwscfg} is not readable" unless File.readable?(pwscfg)
-
-    yaml = YAML::load_file(pwscfg)
-    key = 'trusted_users'
-    raise "error: #{pwscfg} has no '#{key}' key" unless yaml.has_key?(key)
-
-    trusted_users = yaml[key]
-    dir = Dir.pwd
-    raise "error: #{pwscfg} has no '#{key}/#{dir}' key" unless trusted_users.has_key?(dir)
-
-    trusted_users_for_dir = trusted_users[dir]
-
-    dircfg = File.join(dir, '.users')
-    raise "error: #{dircfg} is not readable" unless File.readable?(dircfg)
-
-    valid = false
-    lines = GPGME::Crypto.verify(IO.read(dircfg)) do |sig|
-      valid = true if sig.valid? and trusted_users_for_dir.include?(sig.fpr)
-    end.to_s
-    raise "error: #{dircfg} has invalid signature" unless valid
-
-    lines.each_line do |line|
-      next if line =~ /^#/
-      next if line =~ /^$/
-      if (m = /^(@[a-zA-Z0-9-]+)\s*=\s*(.*)$/.match(line))
-        raise "error: #{dircfg} has duplicate group: #{m[1]}" if @groups.has_key?(m[1])
-        @groups[m[1]] = []
-        m[2].split(/[\t ,]+/).each do |x|
-          if x.start_with?('@')
-            raise "error: #{dircfg} has unknown group: #{x}" unless @groups.has_key?(x)
-          else
-            raise "error: #{dircfg} has unknown user: #{x}" unless @users.has_key?(x)
-          end
-          @groups[m[1]].push(x)
-        end
-      elsif (m = /^([a-zA-Z0-9:-]+)\s*=\s*([0-9A-Fa-f]{40})\s*$/.match(line))
-        raise "error: #{dircfg} has duplicate user: #{m[1]}" if @users.has_key?(m[1])
-        @users[m[1]] = m[2]
-      else
-        raise "error: #{dircfg} has invalid line: #{line}"
-      end
-    end
-  end
-
-  def decrypt(content)
-    raise 'error: no content to decrypt' if content.nil? or content.empty?
-    GPGME::Crypto.decrypt(content).to_s
-  end
-
-  def encrypt(content)
-    raise 'error: no content to encrypt' if content.nil? or content.empty?
-    access = content.lines.first.chomp.sub!(/^access: /, '')
-    raise 'error: invalid access line' if access.nil? or access.empty?
-    fprs = get_fprs(access)
-    raise 'error: no recipients of encryption' if fprs.nil? or fprs.empty?
-    raise 'error: no keys for some recipients' if fprs.any?{|x| GPGME::Key.exclude?(x)}
-    GPGME::Crypto.encrypt(content, :armor => true, :always_trust => true, :recipients => fprs)
-  end
-
-  def display_keyring
-    @users.each_pair do |user,fpr|
-      result = GPGME::Key.include?(fpr) ? 'have' : 'need'
-      STDOUT.puts "#{result} #{fpr} for #{user}"
-    end
-  end
-
-  def refresh_keyring
-    @users.each_pair do |user,fpr|
-      STDOUT.print "refreshing #{fpr} for #{user}... "
-      qry = "op=get&search=0x#{fpr}&options=mr"
-      res = HTTParty.get("https://sks-keyservers.net/pks/lookup?#{qry}")
-      if res.code == 200 and res.body.start_with?('-----BEGIN PGP PUBLIC KEY BLOCK-----')
-        STDOUT.puts 'succeeded'
-        GPGME::Key.import(res.body)
-      else
-        STDOUT.puts 'failed'
-      end
-    end
-  end
-
-  private
-
-  def get_fprs(x)
-    x.split(/[\t ,]+/).collect do |y|
-      if y.start_with?('@')
-        raise "error: invalid access line: unknown group: #{y}" unless @groups.has_key?(y)
-        @groups[y].collect{|z| get_fprs(z)} # recurse
-      else
-        raise "error: invalid access line: unknown user: #{y}" unless @users.has_key?(y)
-        [ @users[y] ] # flatten applies to arrays not strings
-      end
-    end.flatten.uniq
-  end
-end
-
 module App
+  class Editor
+    def initialize
+      editors = []
+      unless ENV['EDITOR'].nil? or ENV['EDITOR'].empty?
+        editor = Pathname.new(ENV['EDITOR'].chomp)
+        if editor.absolute?
+          editors.push(editor.cleanpath)
+        else
+          editors += Shell.default_system_path.collect{|x| File.join(x, editor)}
+        end
+      end
+      editors += %w{/usr/bin/sensible-editor /usr/bin/editor /usr/bin/vi}
+      @editor = editors.detect{|x| File.executable?(x)}
+      raise 'error: editor not found' unless @editor
+    end
+
+    def edit(content)
+      tempfile = Tempfile.open('pws')
+      tempfile.write(content)
+      tempfile.close
+      system(@editor, tempfile.path)
+      IO.read(tempfile.path)
+    end
+  end
+
+  class Crypto
+    def initialize()
+      @users = {}
+      @groups = {}
+
+      pwscfg = File.join(ENV['HOME'], '.pws.yaml')
+      raise "error: #{pwscfg} is not readable" unless File.readable?(pwscfg)
+
+      yaml = YAML::load_file(pwscfg)
+      key = 'trusted_users'
+      raise "error: #{pwscfg} has no '#{key}' key" unless yaml.has_key?(key)
+
+      trusted_users = yaml[key]
+      dir = Dir.pwd
+      raise "error: #{pwscfg} has no '#{key}/#{dir}' key" unless trusted_users.has_key?(dir)
+
+      trusted_users_for_dir = trusted_users[dir]
+
+      dircfg = File.join(dir, '.users')
+      raise "error: #{dircfg} is not readable" unless File.readable?(dircfg)
+
+      valid = false
+      lines = GPGME::Crypto.verify(IO.read(dircfg)) do |sig|
+        valid = true if sig.valid? and trusted_users_for_dir.include?(sig.fpr)
+      end.to_s
+      raise "error: #{dircfg} has invalid signature" unless valid
+
+      lines.each_line do |line|
+        next if line =~ /^#/
+        next if line =~ /^$/
+        if (m = /^(@[a-zA-Z0-9-]+)\s*=\s*(.*)$/.match(line))
+          raise "error: #{dircfg} has duplicate group: #{m[1]}" if @groups.has_key?(m[1])
+          @groups[m[1]] = []
+          m[2].split(/[\t ,]+/).each do |x|
+            if x.start_with?('@')
+              raise "error: #{dircfg} has unknown group: #{x}" unless @groups.has_key?(x)
+            else
+              raise "error: #{dircfg} has unknown user: #{x}" unless @users.has_key?(x)
+            end
+            @groups[m[1]].push(x)
+          end
+        elsif (m = /^([a-zA-Z0-9:-]+)\s*=\s*([0-9A-Fa-f]{40})\s*$/.match(line))
+          raise "error: #{dircfg} has duplicate user: #{m[1]}" if @users.has_key?(m[1])
+          @users[m[1]] = m[2]
+        else
+          raise "error: #{dircfg} has invalid line: #{line}"
+        end
+      end
+    end
+
+    def decrypt(content)
+      raise 'error: no content to decrypt' if content.nil? or content.empty?
+      GPGME::Crypto.decrypt(content).to_s
+    end
+
+    def encrypt(content)
+      raise 'error: no content to encrypt' if content.nil? or content.empty?
+      access = content.lines.first.chomp.sub!(/^access: /, '')
+      raise 'error: invalid access line' if access.nil? or access.empty?
+      fprs = get_fprs(access)
+      raise 'error: no recipients of encryption' if fprs.nil? or fprs.empty?
+      raise 'error: no keys for some recipients' if fprs.any?{|x| GPGME::Key.exclude?(x)}
+      GPGME::Crypto.encrypt(content, :armor => true, :always_trust => true, :recipients => fprs)
+    end
+
+    def display_keyring
+      @users.each_pair do |user,fpr|
+        result = GPGME::Key.include?(fpr) ? 'have' : 'need'
+        STDOUT.puts "#{result} #{fpr} for #{user}"
+      end
+    end
+
+    def refresh_keyring
+      @users.each_pair do |user,fpr|
+        STDOUT.print "refreshing #{fpr} for #{user}... "
+        qry = "op=get&search=0x#{fpr}&options=mr"
+        res = HTTParty.get("https://sks-keyservers.net/pks/lookup?#{qry}")
+        if res.code == 200 and res.body.start_with?('-----BEGIN PGP PUBLIC KEY BLOCK-----')
+          STDOUT.puts 'succeeded'
+          GPGME::Key.import(res.body)
+        else
+          STDOUT.puts 'failed'
+        end
+      end
+    end
+
+    private
+
+    def get_fprs(x)
+      x.split(/[\t ,]+/).collect do |y|
+        if y.start_with?('@')
+          raise "error: invalid access line: unknown group: #{y}" unless @groups.has_key?(y)
+          @groups[y].collect{|z| get_fprs(z)} # recurse
+        else
+          raise "error: invalid access line: unknown user: #{y}" unless @users.has_key?(y)
+          [ @users[y] ] # flatten applies to arrays not strings
+        end
+      end.flatten.uniq
+    end
+  end
+
   class KeyringSubcommand < Thor
     package_name "%s keyring" % File.basename($0, '.*')
     namespace 'keyring'
@@ -247,8 +247,8 @@ module App
 end
 
 if __FILE__ == $0
-  $editor = Editor.new
-  $crypto = Crypto.new
+  $editor = App::Editor.new
+  $crypto = App::Crypto.new
   App::Commands.start
 end
 
