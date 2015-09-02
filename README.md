@@ -17,7 +17,7 @@ two-fold:
   object goes out of scope, and by invoking the editor -- via `system()` -- to
   edit the temporary file
 
-Two challenges remain:
+Three challenges remain:
 - determine whether [ruby-gpgme][3] permits the use of an alternate public keyring: this
   would allow this reimplementation to make use of `dir/.keyring`
 - determine whether [ruby-gpgme][3] could emit the encryption recipients of an encrypted
@@ -25,6 +25,8 @@ Two challenges remain:
   allow the 'dir' command to be implemented so that encrypted files may be verified as
   having been encrypted for the appropriate recipients while avoiding the overhead
   of decryption or the irritation of prompting for the private key passphrase
+- determine whether [ruby-gpgme][3] can import public keys from keyservers: this would
+  allow us to avoid retrieving public keys from https://sks-keyservers.net/pks/lookup
 
 [1]: https://github.com/weaselp/pwstore
 [2]: http://ruby-doc.org/stdlib-2.2.3/libdoc/tempfile/rdoc/Tempfile.html
