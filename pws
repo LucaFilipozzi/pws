@@ -158,7 +158,7 @@ class Crypto
 
   def refresh_keyring
     @users.each_pair do |user,fpr|
-      STDOUT.print "importing #{fpr} for #{user}... "
+      STDOUT.print "refreshing #{fpr} for #{user}... "
       qry = "op=get&search=0x#{fpr}&options=mr"
       res = HTTParty.get("https://sks-keyservers.net/pks/lookup?#{qry}")
       if res.code == 200 and res.body.start_with?('-----BEGIN PGP PUBLIC KEY BLOCK-----')
@@ -185,64 +185,71 @@ class Crypto
   end
 end
 
-class App < Thor
-  package_name File.basename($0, '.*')
+module App
+  class KeyringSubcommand < Thor
+    package_name "%s keyring" % File.basename($0, '.*')
+    namespace 'keyring'
 
-  def initialize(*args)
-    super
-    @editor = Editor.new
-    @crypto = Crypto.new
+    desc 'display', 'display keys in public keyring'
+    def display
+      $crypto.display_keyring
+    end
+
+    desc 'refresh', 'refresh keys in public keyring'
+    def refresh
+      $crypto.refresh_keyring
+    end
   end
 
-  desc "add FILE", "add file"
-  def add(file)
-    raise "error: file #{file} already exists" if File.exists?(file)
-    IO.write(file, @crypto.encrypt(@editor.edit('access: FIXME')))
-  end
+  class Commands < Thor
+    package_name File.basename($0, '.*')
+    namespace File.basename($0, '.*')
 
-  desc "cat FILE", "cat file"
-  def cat(file)
-    raise "error: file #{file} is not encrypted" unless File.encrypted?(file)
-    STDOUT.write(@crypto.decrypt(IO.read(file)))
-  end
+    desc 'add FILE', 'add file'
+    def add(file)
+      raise "error: file #{file} already exists" if File.exists?(file)
+      IO.write(file, $crypto.encrypt($editor.edit('access: FIXME')))
+    end
 
-  desc "dec FILE", "decrypt file"
-  def dec(file)
-    raise "error: file #{file} is not encrypted" unless File.encrypted?(file)
-    IO.write(file, @crypto.decrypt(IO.read(file)))
-  end
+    desc 'cat FILE', 'cat file'
+    def cat(file)
+      raise "error: file #{file} is not encrypted" unless File.encrypted?(file)
+      STDOUT.write($crypto.decrypt(IO.read(file)))
+    end
 
-  desc "dir [PATH]", "list directory"
-  def dir(path)
-    raise 'error: not implemented'
-  end
+    desc 'dec FILE', 'decrypt file'
+    def dec(file)
+      raise "error: file #{file} is not encrypted" unless File.encrypted?(file)
+      IO.write(file, $crypto.decrypt(IO.read(file)))
+    end
 
-  desc "enc FILE", "(re-)encrypt file"
-  def enc(file)
-    content = File.encrypted?(file) ? @crypto.decrypt(IO.read(file)) : IO.read(file)
-    IO.write(file, @crypto.encrypt(content))
-  end
+    desc 'dir [PATH]', 'list directory'
+    def dir(path=Dir.pwd)
+      raise 'error: not implemented'
+    end
 
-  desc "mod FILE", "modify file"
-  def mod(file)
-    old_content = @crypto.decrypt(IO.read(file))
-    new_content = @editor.edit(old_content)
-    IO.write(file, @crypto.encrypt(new_content)) unless new_content == old_content
-  end
+    desc 'enc FILE', '(re-)encrypt file'
+    def enc(file)
+      content = File.encrypted?(file) ? $crypto.decrypt(IO.read(file)) : IO.read(file)
+      IO.write(file, $crypto.encrypt(content))
+    end
 
-  desc "display-keyring", "display public keys"
-  def display_keyring
-    @crypto.display_keyring
-  end
+    desc 'mod FILE', 'modify file'
+    def mod(file)
+      old_content = $crypto.decrypt(IO.read(file))
+      new_content = $editor.edit(old_content)
+      IO.write(file, $crypto.encrypt(new_content)) unless new_content == old_content
+    end
 
-  desc "refresh-keyring", "refresh public keys"
-  def refresh_keyring
-    @crypto.refresh_keyring
+    desc 'keyring <display|refresh>', 'display or refresh keyring'
+    subcommand 'keyring', App::KeyringSubcommand
   end
 end
 
 if __FILE__ == $0
-  App.start
+  $editor = Editor.new
+  $crypto = Crypto.new
+  App::Commands.start
 end
 
 # vim: set ts=2 sw=2 et ai si fdm=indent:
