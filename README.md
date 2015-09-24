@@ -3,9 +3,11 @@
 A reimplementation of Peter Palfrader's [pwstore][1]
 - implemented in ruby, leveraging [ruby-gpgme][3] and [thor][4]
 - command line interface differs: 'new' for 'ed -n', 'mod' for 'ed', 'enc' for 'rc'
-- compatible with `~/.pws.yaml` but not `~/.pws-trusted-users`
-- compatible with `dir/.users`
+- 100% compatible with `~/.pws.yaml` but not `~/.pws-trusted-users`
+- 90%** compatible with `dir/.users`
 - ignores `dir/.keyring` however
+
+** The 10% being that entries in `dir/.users` must be defined before being used.
 
 Ultimately, the purpose of both [pwstore][1] and this reimplementation is
 two-fold:
