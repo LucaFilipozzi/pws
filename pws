@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 #
 # Copyright (C) 2015 Peter Palfrader
-# Copyright (C) 2015 Luca Filipozzi
+# Copyright (C) 2018 Luca Filipozzi
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -26,6 +26,7 @@ require 'gpgme'
 require 'magic'
 require 'pathname'
 require 'shell'
+require 'tempfile'
 require 'thor'
 require 'yaml'
 
@@ -61,6 +62,9 @@ File.include CoreExtensions::File
 GPGME::Key.include CoreExtensions::GPGME::Key
 
 module App
+  class Error < StandardError
+  end
+
   class Editor
     def initialize
       editors = []
@@ -74,7 +78,7 @@ module App
       end
       editors += %w{/usr/bin/sensible-editor /usr/bin/editor /usr/bin/vi}
       @editor = editors.detect{|x| File.executable?(x)}
-      raise 'error: editor not found' unless @editor
+      raise Error, 'error: editor not found' unless @editor
     end
 
     def edit(content)
@@ -92,80 +96,80 @@ module App
       @groups = {}
 
       pwscfg = File.join(ENV['HOME'], '.pws.yaml')
-      raise "error: #{pwscfg} is not readable" unless File.readable?(pwscfg)
+      raise Error, "error: #{pwscfg} is not readable" unless File.readable?(pwscfg)
 
       yaml = YAML::load_file(pwscfg)
       key = 'trusted_users'
-      raise "error: #{pwscfg} has no '#{key}' key" unless yaml.has_key?(key)
+      raise Error, "error: #{pwscfg} has no '#{key}' key" unless yaml.has_key?(key)
 
       trusted_users = yaml[key]
       dir = Dir.pwd
-      raise "error: #{pwscfg} has no '#{key}/#{dir}' key" unless trusted_users.has_key?(dir)
+      raise Error, "error: #{pwscfg} has no '#{key}/#{dir}' key" unless trusted_users.has_key?(dir)
 
       trusted_users_for_dir = trusted_users[dir]
 
       dircfg = File.join(dir, '.users')
-      raise "error: #{dircfg} is not readable" unless File.readable?(dircfg)
+      raise Error, "error: #{dircfg} is not readable" unless File.readable?(dircfg)
 
       valid = false
       lines = GPGME::Crypto.verify(IO.read(dircfg)) do |sig|
         valid = true if sig.valid? and trusted_users_for_dir.include?(sig.fpr)
       end.to_s
-      raise "error: #{dircfg} has invalid signature" unless valid
+      raise Error, "error: #{dircfg} has invalid signature" unless valid
 
       lines.each_line do |line|
         next if line =~ /^#/
         next if line =~ /^$/
         if (m = /^(@[a-zA-Z0-9-]+)\s*=\s*(.*)$/.match(line))
-          raise "error: #{dircfg} has duplicate group: #{m[1]}" if @groups.has_key?(m[1])
+          raise Error, "error: #{dircfg} has duplicate group: #{m[1]}" if @groups.has_key?(m[1])
           @groups[m[1]] = []
           m[2].split(/[\t ,]+/).each do |x|
             if x.start_with?('@')
-              raise "error: #{dircfg} has unknown group: #{x}" unless @groups.has_key?(x)
+              raise Error, "error: #{dircfg} has unknown group: #{x}" unless @groups.has_key?(x)
             else
-              raise "error: #{dircfg} has unknown user: #{x}" unless @users.has_key?(x)
+              raise Error, "error: #{dircfg} has unknown user: #{x}" unless @users.has_key?(x)
             end
             @groups[m[1]].push(x)
           end
         elsif (m = /^([a-zA-Z0-9:-]+)\s*=\s*([0-9A-Fa-f]{40})\s*$/.match(line))
-          raise "error: #{dircfg} has duplicate user: #{m[1]}" if @users.has_key?(m[1])
+          raise Error, "error: #{dircfg} has duplicate user: #{m[1]}" if @users.has_key?(m[1])
           @users[m[1]] = m[2]
         else
-          raise "error: #{dircfg} has invalid line: #{line}"
+          raise Error, "error: #{dircfg} has invalid line: #{line}"
         end
       end
     end
 
     def decrypt(content)
-      raise 'error: no content to decrypt' if content.nil? or content.empty?
+      raise Error, 'error: no content to decrypt' if content.nil? or content.empty?
       GPGME::Crypto.decrypt(content).to_s
     end
 
     def encrypt(content)
-      raise 'error: no content to encrypt' if content.nil? or content.empty?
+      raise Error, 'error: no content to encrypt' if content.nil? or content.empty?
       access = content.lines.first.chomp.sub!(/^access: /, '')
-      raise 'error: invalid access line' if access.nil? or access.empty?
+      raise Error, 'error: invalid access: empty' if access.nil? or access.empty?
       fprs = get_fprs(access)
-      raise 'error: no recipients of encryption' if fprs.nil? or fprs.empty?
-      raise 'error: no keys for some recipients' if fprs.any?{|x| GPGME::Key.exclude?(x)}
+      raise Error, 'error: no recipients of encryption' if fprs.nil? or fprs.empty?
+      raise Error, 'error: no keys for some recipients' if fprs.any?{|x| GPGME::Key.exclude?(x)}
       GPGME::Crypto.encrypt(content, :armor => true, :always_trust => true, :recipients => fprs)
     end
 
-    def display_keyring
+    def display_keys
       @users.each_pair do |user,fpr|
         result = GPGME::Key.include?(fpr) ? 'have' : 'need'
         STDOUT.puts "#{result} #{fpr} for #{user}"
       end
     end
 
-    def refresh_keyring
+    def refresh_keys
       @users.each_pair do |user,fpr|
         STDOUT.print "refreshing #{fpr} for #{user}... "
         qry = "op=get&search=0x#{fpr}&options=mr"
         res = HTTParty.get("https://sks-keyservers.net/pks/lookup?#{qry}")
         if res.code == 200 and res.body.start_with?('-----BEGIN PGP PUBLIC KEY BLOCK-----')
-          STDOUT.puts 'succeeded'
           GPGME::Key.import(res.body)
+          STDOUT.puts 'succeeded'
         else
           STDOUT.puts 'failed'
         end
@@ -177,79 +181,78 @@ module App
     def get_fprs(x)
       x.split(/[\t ,]+/).collect do |y|
         if y.start_with?('@')
-          raise "error: invalid access line: unknown group: #{y}" unless @groups.has_key?(y)
+          raise Error, "error: invalid access: unknown group '#{y}'" unless @groups.has_key?(y)
           @groups[y].collect{|z| get_fprs(z)} # recurse
         else
-          raise "error: invalid access line: unknown user: #{y}" unless @users.has_key?(y)
+          raise Error, "error: invalid access: unknown user '#{y}'" unless @users.has_key?(y)
           [ @users[y] ] # flatten applies to arrays not strings
         end
       end.flatten.uniq
     end
   end
 
-  class KeyringSubcommand < Thor
-    package_name "%s keyring" % File.basename($0, '.*')
-    namespace 'keyring'
-
-    desc 'display', 'display keys in public keyring'
+  class KeysSubcommand < Thor
+    desc 'display', 'display keys'
     def display
-      $crypto.display_keyring
+      $crypto.display_keys
     end
 
-    desc 'refresh', 'refresh keys in public keyring'
+    desc 'refresh', 'refresh keys'
     def refresh
-      $crypto.refresh_keyring
+      $crypto.refresh_keys
     end
   end
 
   class Commands < Thor
-    package_name File.basename($0, '.*')
-    namespace File.basename($0, '.*')
-
     desc 'add FILE', 'add file'
     def add(file)
-      raise "error: file #{file} already exists" if File.exists?(file)
+      raise Error, "error: file #{file} already exists" if File.exists?(file)
       IO.write(file, $crypto.encrypt($editor.edit('access: FIXME')))
     end
 
     desc 'cat FILE', 'cat file'
     def cat(file)
-      raise "error: file #{file} is not encrypted" unless File.encrypted?(file)
+      raise Error, "error: file #{file} is not encrypted" unless File.encrypted?(file)
       STDOUT.write($crypto.decrypt(IO.read(file)))
     end
 
-    desc 'dec FILE', 'decrypt file'
-    def dec(file)
-      raise "error: file #{file} is not encrypted" unless File.encrypted?(file)
+    desc 'decrypt FILE', 'decrypt file'
+    def decrypt(file)
+      raise Error, "error: file #{file} is not encrypted" unless File.encrypted?(file)
       IO.write(file, $crypto.decrypt(IO.read(file)))
     end
 
-    desc 'dir [PATH]', 'list directory'
-    def dir(path=Dir.pwd)
-      raise 'error: not implemented'
+    desc 'ls [PATH]', 'list directory entries'
+    def ls(path=Dir.pwd)
+      raise NotImplementedError
     end
 
-    desc 'enc FILE', '(re-)encrypt file'
-    def enc(file)
+    desc 'encrypt FILE', '(re-)encrypt file'
+    def encrypt(file)
       content = File.encrypted?(file) ? $crypto.decrypt(IO.read(file)) : IO.read(file)
       IO.write(file, $crypto.encrypt(content))
     end
 
-    desc 'mod FILE', 'modify file'
-    def mod(file)
+    desc 'edit FILE', 'edit file'
+    def edit(file)
       old_content = $crypto.decrypt(IO.read(file))
       new_content = $editor.edit(old_content)
       IO.write(file, $crypto.encrypt(new_content)) unless new_content == old_content
     end
 
-    desc 'keyring <display|refresh>', 'display or refresh keyring'
-    subcommand 'keyring', App::KeyringSubcommand
+    desc 'keys <display|refresh>', 'display or refresh keys'
+    subcommand 'keys', App::KeysSubcommand
   end
 end
 
 if __FILE__ == $0
-  $editor = App::Editor.new
-  $crypto = App::Crypto.new
+  begin
+    $editor = App::Editor.new
+    $crypto = App::Crypto.new
+  rescue App::Error => e
+    $stderr.puts e
+    exit 1
+  end
   App::Commands.start
 end
 
